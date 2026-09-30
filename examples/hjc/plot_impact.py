@@ -94,7 +94,7 @@ def main():
         'axes.labelcolor':'#34404D','xtick.color':'#59636F','ytick.color':'#59636F',
         'grid.color':'#E4E9ED','grid.linewidth':.6})
     figure,axes = plt.subplots(1,3,figsize=(11.5,3.4),layout='constrained')
-    colors = ['#4A78AE','#238C84','#D18C56','#273340']
+    colors = ['#3B4CC0','#B40426','#D2A329','#333333']
     summaries = []
     for index,(path,label) in enumerate(zip(args.files,labels)):
         curves,summary = read_history(path)

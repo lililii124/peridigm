@@ -112,10 +112,11 @@ python3 plot_contours.py hjc_disk_impact.e
 ![HJC damage and equivalent stress during sphere impact](impact_contours.png)
 
 The figure shows the central impact region at 10, 25 and 50 microseconds from
-the 25 ns run. Each field uses one fixed color scale across all frames. The
-reference y=0 section retains the y>=0 half of the disk beneath the complete,
-neutral-colored elastic sphere. The orthographic view uses a
-displacement scale of one and is cropped to the impact region.
+the 25 ns run. Its white background, blue/gray/red field colors and gold sphere
+follow the repository's [example gallery](../../README.md#examples). Each field
+uses one fixed color scale across all frames. The reference y=0 section retains
+the y>=0 half of the disk beneath the complete elastic sphere. The orthographic
+view uses a displacement scale of one and is cropped to the impact region.
 
 Material-point values are mapped by `Element_Id` to the original mesh cells
 without smoothing the fields. For visualization only, displacements are
@@ -130,6 +131,20 @@ volume-weighted RMS differences of 0.00436 in damage and 1.40 MPa in equivalent
 stress. Maximum pointwise differences are 0.0960 and 47.5 MPa, respectively;
 the small global-history differences do not establish convergence of local
 softening fields.
+
+For a plan view of target damage:
+
+```sh
+python3 plot_contours.py hjc_disk_impact.e --top-view --output impact_damage_top.png
+```
+
+![Target damage viewed from above, with central close-ups](impact_damage_top.png)
+
+The upper row shows the complete target; the outlined 30 mm square is enlarged
+below. Both rows use the same 0–1 damage scale. Values belong to the 4,815 cells
+on the original upper surface, with no averaging or maximization through the
+thickness. The sphere is hidden in this view. In-plane displacements retain a
+scale of one; nodal displacement projection is the same as in the section view.
 
 This is an early-time impact demonstration, not a perforation or fragmentation
 benchmark. HJC material damage does not remove particles or break bonds. The

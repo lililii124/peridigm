@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-3-Clause
-"""Render HJC impact fields on an advected central section of the original mesh.
+"""Render HJC impact fields on a central section or the target's upper surface.
 
 Requires NumPy, netCDF4 and Matplotlib. Input is serial/merged Exodus output.
 Cell values are not smoothed. Mesh-node displacements are volume averages of
 adjacent material-point displacements, for visualization only. No points are
 deleted based on damage. The disk retains the y>=0 half; the sphere is whole.
+With --top-view, show upper-surface target damage and omit the sphere.
 """
 import argparse
 from pathlib import Path
@@ -13,7 +14,8 @@ from pathlib import Path
 import matplotlib
 matplotlib.use('Agg')
 from matplotlib.collections import PolyCollection
-from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.colors import Normalize
+from matplotlib.patches import Rectangle
 import matplotlib.pyplot as plt
 from netCDF4 import Dataset, chartostring
 import numpy as np
@@ -82,6 +84,8 @@ def main():
     parser.add_argument('--times', nargs='+', type=float, default=[10., 25., 50.],
                         help='saved times in microseconds')
     parser.add_argument('--overview', action='store_true', help='show the entire half disk')
+    parser.add_argument('--top-view', action='store_true',
+                        help='target upper-surface damage, with a central close-up')
     parser.add_argument('--output', type=Path, default=Path('impact_contours.png'))
     args = parser.parse_args()
     with Dataset(args.mesh) as mesh, Dataset(args.file) as data:
@@ -98,7 +102,7 @@ def main():
             return np.asarray(data[f'vals_elem_var{index}eb{block}'][frame])
 
         blocks, offset = [], 0
-        for block in (1, 2):
+        for block in ((1,) if args.top_view else (1, 2)):
             cells = np.asarray(mesh[f'connect{block}'][:])-1
             particles = np.asarray(data[f'connect{block}'][:]).ravel()-1
             # Element_Id survives MPI partitioning; never assume output order.
@@ -112,7 +116,13 @@ def main():
                 raise ValueError('invalid material-point volumes')
             weight = np.repeat(volume, cells.shape[1])
             nodal_weight = np.bincount(cells.ravel(), weights=weight, minlength=len(points))
-            faces = section_faces(points, cells, cut=block == 1)
+            faces = section_faces(points, cells, cut=block == 1 and not args.top_view)
+            if args.top_view:
+                top = np.all(np.isclose(points[faces[0], 2], points[cells, 2].max()), axis=1)
+                if not np.any(top):
+                    raise ValueError('no planar upper surface in the target mesh')
+                faces = tuple(values[top] for values in faces)
+                print(f'{len(faces[3])} target upper-surface cells selected')
             blocks.append((block, cells, particles[order], order, weight, nodal_weight, faces))
 
         # Orthographic projection; all lengths and displacements use the same scale.
@@ -121,19 +131,22 @@ def main():
         eye = np.array([np.cos(azimuth)*np.cos(elevation),
                         np.sin(azimuth)*np.cos(elevation), np.sin(elevation)])
         projection = np.stack((right, np.cross(eye, right), eye), axis=1)
-        cmap = LinearSegmentedColormap.from_list('hjc',
-            ['#edf3f8', '#b3cedd', '#63a9b5', '#288587', '#225d74', '#203854'])
+        if args.top_view:
+            projection = np.eye(3)
+        # Match the white background and blue/gray/red fields in doc/slide-image-*.jpg.
+        cmap = plt.get_cmap('coolwarm')
         fields = [('HJC_Damage', 1., Normalize(0., 1.), 'Damage', [0., .5, 1.]),
                   ('Von_Mises_Stress', 1.e-6, Normalize(0., 600.),
                    'Equivalent stress / MPa', [0., 300., 600.])]
-        plt.rcParams.update({'font.size': 11, 'text.color': '#334152',
-                             'axes.labelcolor': '#334152', 'font.family': 'DejaVu Sans'})
-        figure, axes = plt.subplots(2, len(frames), figsize=(4.2*len(frames), 6.4),
+        if args.top_view:
+            fields = [fields[0], fields[0]]
+        plt.rcParams.update({'font.size': 11, 'text.color': 'black',
+                             'axes.labelcolor': 'black', 'font.family': 'DejaVu Sans'})
+        figure, axes = plt.subplots(2, len(frames),
+                                   figsize=(4.2*len(frames), 8. if args.top_view else 5.5),
                                    squeeze=False)
-        figure.subplots_adjust(left=.018, right=.91, bottom=.07, top=.86,
-                               wspace=.04, hspace=.18)
-        figure.text(.026, .964, 'HJC  /  SPHERE IMPACT', size=16, weight='medium')
-        figure.text(.026, .921, 'Central section   ·   displacement ×1', size=10, color='#697685')
+        figure.subplots_adjust(left=.018, right=.91, bottom=.065, top=.90,
+                               wspace=.04, hspace=.15)
 
         for column, frame in enumerate(frames):
             displacement = np.column_stack([
@@ -166,8 +179,9 @@ def main():
                                           vertices[:, 2]-vertices[:, 0])
                         length = np.linalg.norm(normal, axis=1)
                         brightness = .65+.28*abs(normal@np.array([-.4, -.5, .768]))/np.maximum(length, 1.e-30)
-                        colors.extend(np.column_stack((brightness*.94, brightness*.97,
-                                                       brightness, np.ones(len(vertices)))))
+                        # Use the distinct gold sphere from the upstream impact gallery.
+                        colors.extend(np.column_stack((brightness, brightness*.79,
+                                                       brightness*.14, np.ones(len(vertices)))))
                 depth = np.array([polygon[:, 2].mean() for polygon in polygons])
                 order = np.argsort(depth)
                 axis = axes[row, column]
@@ -176,23 +190,37 @@ def main():
                                     antialiased=False))
                 limits = ((-42., 42.), (-18., 31.)) if args.overview \
                     else ((-18., 18.), (-7., 14.))
+                if args.top_view:
+                    extent = 40. if row == 0 else 15.
+                    limits = ((-extent, extent), (-extent, extent))
+                    if row == 0:
+                        axis.add_patch(Rectangle((-15., -15.), 30., 30., fill=False,
+                                                 edgecolor='#C9CED6', linewidth=.6))
                 axis.set(xlim=limits[0], ylim=limits[1], aspect='equal')
                 axis.set_axis_off()
                 if row == 0:
                     axis.set_title(f'{times[frame]:g} μs', fontsize=12, pad=10)
-            print(f'{times[frame]:g} us: damage and equivalent stress rendered')
+            print(f'{times[frame]:g} us: fields rendered')
         for row, (_, _, norm, label, ticks) in enumerate(fields):
             position = axes[row, -1].get_position()
-            bar_axis = figure.add_axes((.935, position.y0+.04, .012, position.height-.07))
+            label = ['Target damage', 'Impact region'][row] if args.top_view else label
+            figure.text(.026, position.y1+.018, label, size=11)
+            if args.top_view and row == 1:
+                continue
+            bar_position = (.935, .22, .012, .52) if args.top_view \
+                else (.935, position.y0+.04, .012, position.height-.07)
+            bar_axis = figure.add_axes(bar_position)
             bar = figure.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=bar_axis,
                                  ticks=ticks)
             bar.outline.set_visible(False)
             bar.ax.tick_params(size=0, labelsize=9, pad=6)
-            figure.text(.026, position.y1+.018, label, size=11)
-        xbar, ybar = (-38., -12.) if args.overview else (-16., -5.5)
-        axes[1, 0].plot([xbar, xbar+5.], [ybar, ybar], color='#465669', lw=1.8)
-        axes[1, 0].text(xbar+2.5, ybar-1.5 if args.overview else ybar-1.1,
-                       '5 mm', ha='center', size=9, color='#697685')
+        bars = [(1, -14., -17., 5.), (0, -37., -37., 10.)] if args.top_view \
+            else [(1, -38., -12., 5.)] if args.overview else [(1, -16., -5.5, 5.)]
+        for row, xbar, ybar, length in bars:
+            axes[row, 0].plot([xbar, xbar+length], [ybar, ybar], color='black',
+                              lw=1.5, clip_on=False)
+            axes[row, 0].text(xbar+length/2., ybar-1.5 if args.top_view or args.overview
+                              else ybar-1.1, f'{length:g} mm', ha='center', va='top', size=9)
         figure.savefig(args.output, dpi=240, facecolor='white',
                        metadata={'Software': 'HJC impact visualization'})
         plt.close(figure)
