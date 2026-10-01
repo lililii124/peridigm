@@ -5,6 +5,77 @@ irreversible crushing and scalar material damage to the existing corotational
 correspondence interface. The integration conventions are described below.
 Density, stress and time units must be consistent.
 
+## Taylor cylinder impact
+
+```sh
+python3 generate_taylor.py --output taylor
+cd taylor
+/path/to/Peridigm taylor.xml
+python3 ../plot_taylor.py taylor.e
+```
+
+The standard-library generator creates a full three-dimensional cylinder of
+diameter 10 mm and length 20 mm, initially 0.5 mm above the wall at z=0, moving
+at -30 m/s along z. Cylinder spacing is 0.5 mm (12,640 points), the horizon is
+3.01 times spacing, and the hourglass coefficient is 0.05. A fixed 10 ns
+timestep runs to 60 microseconds. This uses classical Taylor cylinder-impact
+geometry with illustrative concrete parameters, rather than a calibration
+against Taylor's metal-impact experiments.
+
+The fixed wall is a single layer of points with zero prescribed displacement
+in all directions. Its x/y spacing is half the cylinder spacing, cell thickness
+equals cylinder spacing, and centers lie at z=-spacing/2; cell volumes are
+spacing cubed divided by four. No bonds join the blocks. Native `Short Range
+Force` contact uses zero friction coefficient and contact radius equal to
+cylinder spacing. The spring constant is derived in the generator from the
+initial longitudinal modulus, scaled by `--wall-factor` (default 2). Contact
+search updates every 0.1 microseconds with radius three cylinder spacings.
+This is a discrete wall: pair-force directions follow point separation, rather
+than an analytic plane normal. Denser wall sampling reduces contact gaps.
+
+```sh
+# Separate directories for refinement checks:
+python3 generate_taylor.py --dt 5e-9 --output taylor_half_dt
+python3 generate_taylor.py --spacing .001 --dt 2e-8 --output taylor_coarse
+# Text discretization can also run directly in parallel:
+mpiexec -np 4 /path/to/Peridigm taylor.xml
+epu -auto taylor.e.4.0
+```
+
+The plotter needs NumPy, netCDF4 and Matplotlib. Field output is saved every
+microsecond; the small `taylor_history.h` stores block sums every timestep.
+Global-only history is already written as a single file in parallel runs;
+only the field output needs merging.
+The plotter compares contact impulse with cylinder momentum change, and checks
+finite fields, positive deformation determinants, irreversible histories,
+fixed wall displacement and saved-frame penetration below 10% of spacing.
+Wall velocities in output include the Verlet final half-kick on constrained
+degrees of freedom; prescribed displacement fixes its position. Only cylinder
+velocities enter the response histories.
+
+![Taylor cylinder damage and equivalent stress](taylor_contours.png)
+
+The reference y>=0 half exposes the interior at 20, 40 and 60 microseconds.
+Positions include actual displacement at scale one; fields are not smoothed
+and fully damaged points remain visible. Fixed color scales, a white background
+and blue/gray/red fields follow the example gallery. The gray patch represents
+the wall; axes are hidden to keep labels minimal.
+
+![Taylor contact force, axial velocity and damage](taylor_response.png)
+
+Curves show total cylinder contact force, mass-averaged axial velocity and
+volume-averaged damage. All cylinder cells have equal volume. CSV histories and
+a JSON diagnostic summary accompany the plots. Pass multiple Exodus files with
+`--labels` to compare runs. If output resolutions differ, comparisons use the
+coarser time grid. Local softening is not mesh objective, so timestep consistency
+does not establish spatial convergence or experimental accuracy.
+
+For 10 ns versus 5 ns, every-step contact-force and mean-damage peak-normalized
+RMSE are 0.458% and 0.0648%. At 60 microseconds, local damage RMS/maximum
+differences are 0.0311/0.443; equivalent-stress differences are 8.11/91.6 MPa.
+The 1 mm and 0.5 mm meshes have final mean damage 0.898 and 0.840. These local
+and spatial differences remain significant despite similar global histories.
+
 ## Homogeneous verification example
 
 ```sh
@@ -34,13 +105,6 @@ calibration. The Exodus output includes `HJC_Pressure` (compression positive),
 `Equivalent_Plastic_Strain`, `HJC_Density_Measure` and `HJC_Acoustic_Modulus`.
 
 ![Pressure, equivalent stress and damage histories](response.png)
-
-The material-point reference uses an independently checked constitutive update,
-independent polar/log-strain kinematics and a 5 ns timestep.
-Pressure/stress peak-normalized RMSE was 0.0248%/0.0393% at 100 ns and
-0.0117%/0.0241% at 50 ns. Serial and two-process histories differed by less
-than 1e-6 Pa in pressure and equivalent stress. These are patch-test results,
-not experimental validation of concrete parameters.
 
 Use separate output directories for `--dt 5e-8`, `--cells 12`, another
 `--horizon-ratio`, or `--hourglass`. The last option controls the existing
@@ -95,14 +159,6 @@ frequency at 10 steps also halves its physical search interval. For MPI, first
 decompose the existing mesh with the usual SEACAS `decomp` command; use `epu`
 to merge partitioned output before plotting.
 
-On this mesh, the 50 ns/25 ns histories have peak-normalized RMSE of 0.416%
-in contact force and 0.391% in volume-averaged disk damage. The final sphere
-velocities differ by 0.0412 m/s. The minimum disk deformation determinant
-over both runs is 0.9129, and relative vector-momentum drift is below 4e-15.
-Serial/four-process runs over the first 20 microseconds agree to 1.2e-10 N
-in saved contact forces. These checks establish numerical consistency for
-this example; they do not establish experimental accuracy.
-
 ### Impact contours
 
 ```sh
@@ -125,12 +181,6 @@ damaged cells remain visible. The plotter uses the same dependencies as the
 response plotter; `--times` selects saved times in microseconds, `--mesh`
 selects the original mesh, `--overview` shows the entire half disk, and
 `--output` sets the image path.
-
-At 50 microseconds, within 15 mm of the impact axis, timestep refinement gives
-volume-weighted RMS differences of 0.00436 in damage and 1.40 MPa in equivalent
-stress. Maximum pointwise differences are 0.0960 and 47.5 MPa, respectively;
-the small global-history differences do not establish convergence of local
-softening fields.
 
 For a plan view of target damage:
 
@@ -169,18 +219,22 @@ the unrotated deformation rate, rotates Cauchy stress, and assembles forces.
 
 The integration choices are:
 
-- `mu=exp(-integral(trace(D)*dt))-1`; the previous density measure chooses the
-  EOS branch and unloading modulus. The compacted EOS is cubic in
-  `(mu-UL)/(1+UL)`. Its transition is not forced to be continuous.
-- The pressure cutoff uses old damage; tensile normalized strength is
-  `A*(1-D-p/T)` when `p<0`.
-- Rates below the reference rate retain the negative logarithm, with a
-  `1e-8` floor in the chosen time units. Final strength is bounded between
-  zero and `SFMAX`.
-- Damage increases only if `D1*(p/FC+T/FC)^D2 > EFMIN`; `EFMIN` is an
-  activation gate, not a denominator floor. When this gate is initially open,
-  damage starts at `min(1,1e-4/[D1*(T/FC)^D2])`, while plastic strain is zero.
-  The plastic-strain counter freezes at exactly zero strength.
+- Compression is positive in pressure and plastic volume. The accumulated
+  log-volume gives `mu=exp(-integral(trace(D)*dt))-1`. Maximum compression records
+  irreversible compaction. A linear crushing line joins PC to PL; the locking
+  compression is found from the dense polynomial so both branches meet at PL.
+  The permanent plastic offset grows linearly from zero to UL. Partial
+  compaction unloads along the secant through peak pressure and plastic offset.
+  After locking, pressure is cubic in `(mu-UL)/(1+UL)` when that strain is
+  positive and linear when it is negative.
+- Compression strength is `A*(1-D)+B*(p/FC)^N`; tensile strength is
+  `A*max(0,1-D+p/T)`. Strength uses start-of-step damage; the tensile pressure
+  cutoff is reapplied after damage growth.
+- The rate multiplier is `1+C*log(max(1,rate/rate0))`, capped by SFMAX.
+- Initially D=0. Fracture strain is
+  `max(EFMIN,D1*max((p+T)/FC,0)^D2)`, as in Meyer [2]. Plastic shear and plastic
+  volume increments accumulate damage up to one. Plastic shear continues to
+  accumulate at zero strength. Fully damaged material retains confined strength.
 
 These conventions define this implementation. `HJC_Damage` is material damage
 and is independent of peridynamic `Bond_Damage`. This material does not delete
@@ -190,13 +244,21 @@ strength. Thermal expansion is not supported.
 ## Tests and references
 
 `ctest -R utPeridigm_HJCCorrespondenceMaterial --output-on-failure` runs
-analytic invariants, engineering-shear checks, damage/crushing tests,
-parameter rejection, six independent reference transitions and DataManager
-history/tensor-mapping checks. The compact fixtures reconstruct the starting
-state and trial deviator from numerical output; they verify one-step
-constitutive returns. The fixtures are self-contained numerical data.
+elastic hydrostatic and engineering-shear invariants, low-pressure damage,
+damage saturation, tensile cutoff, plastic flow at zero strength, sub-reference
+rates, parameter rejection and DataManager history/tensor mapping. An exactly
+factorable dense polynomial checks the crushing midpoint, unloading offset
+and continuous locking pressure against analytical values.
 
 1. Holmquist, T. J., Johnson, G. R., and Cook, W. H. (1993).
    *A computational constitutive model for concrete subjected to large strains,
    high strain rates, and high pressures*. Proceedings of the 14th
    International Symposium on Ballistics, Quebec, pp. 591-600.
+
+2. Meyer, C. S. (2011). *Development of Geomaterial Parameters for Numerical
+   Simulations Using the Holmquist-Johnson-Cook Constitutive Model for Concrete*.
+   ARL-TR-5556, pp. 2–7.
+   [Report](https://www.govinfo.gov/content/pkg/GOVPUB-D101-PURL-gpo10967/pdf/GOVPUB-D101-PURL-gpo10967.pdf).
+3. Taylor, G. I. (1948). *The use of flat-ended projectiles for determining
+   dynamic yield stress. I. Theoretical considerations*. Proceedings of the
+   Royal Society A, 194, 289–299. [DOI](https://doi.org/10.1098/rspa.1948.0081).

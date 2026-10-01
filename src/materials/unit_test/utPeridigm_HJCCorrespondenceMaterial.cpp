@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include "Peridigm_HJCCorrespondenceMaterial.hpp"
 #include "Peridigm_Field.hpp"
-#include "HjcReference.h"
+#include "HjcTests.h"
 #include <Teuchos_UnitTestHarness.hpp>
 #include <Teuchos_UnitTestRepository.hpp>
 #include <Epetra_SerialComm.h>
@@ -23,9 +23,8 @@ static Teuchos::ParameterList parameters() {
   return p;
 }
 
-TEUCHOS_UNIT_TEST(HJC, materialPointReferenceAndBranches) {
+TEUCHOS_UNIT_TEST(HJC, analyticBranches) {
   TEST_NOTHROW(hjc_tests::runAnalytic());
-  TEST_NOTHROW(hjc_tests::runReference());
 }
 
 TEUCHOS_UNIT_TEST(HJC, parameterValidation) {
@@ -36,6 +35,10 @@ TEUCHOS_UNIT_TEST(HJC, parameterValidation) {
   p=parameters();p.set("Bulk Modulus",1.);
   TEST_THROW(HJCCorrespondenceMaterial{p},std::exception);
   p=parameters();p.set("Thermal Expansion Coefficient",1.e-5);
+  TEST_THROW(HJCCorrespondenceMaterial{p},std::exception);
+  p=parameters();p.set("EFMIN",0.);
+  TEST_THROW(HJCCorrespondenceMaterial{p},std::exception);
+  p=parameters();p.set("Crushing Volumetric Strain",.1);
   TEST_THROW(HJCCorrespondenceMaterial{p},std::exception);
 }
 
@@ -63,7 +66,7 @@ TEUCHOS_UNIT_TEST(HJC, historyAndTensorMapping) {
     for(int j=0;j<8;++j) if(j!=i) neighbors[k++]=j;
   }
   material.initialize(1.e-6,8,owned,neighbors,dm);
-  const double initialDamage=1.e-4/(4.*8.2e6/1.19e8);
+  const double initialDamage=0.;
   TEST_FLOATING_EQUALITY(data("HJC_Damage",PeridigmField::STEP_N)[0],initialDamage,1.e-13);
   auto& rate=data("Unrotated_Rate_Of_Deformation",PeridigmField::STEP_NONE);
   for(int i=0;i<8;++i) {

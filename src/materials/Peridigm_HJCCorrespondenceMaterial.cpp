@@ -38,7 +38,7 @@ PeridigmNS::HJCCorrespondenceMaterial::HJCCorrespondenceMaterial(
   p.d1=params.get<double>("D1"); p.d2=params.get<double>("D2");
   p.k1=params.get<double>("K1"); p.k2=params.get<double>("K2");
   p.k3=params.get<double>("K3");
-  TEUCHOS_TEST_FOR_EXCEPT_MSG(!hjc::valid(p) ||
+  TEUCHOS_TEST_FOR_EXCEPT_MSG(!hjc::prepare(p) ||
     !std::isfinite(m_density) || m_density<=0.0,"Invalid HJC material parameters.");
   TEUCHOS_TEST_FOR_EXCEPT_MSG(params.isParameter("Thermal Expansion Coefficient"),
     "HJC Correspondence does not include thermal expansion.");

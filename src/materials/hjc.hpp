@@ -15,6 +15,7 @@ namespace hjc {
 struct Parameters {
   double g, a, b, c, n, fc, tension, rate0, efmin, sfmax;
   double pc, muc, pl, mul, d1, d2, k1, k2, k3;
+  double locking_compression, crushing_slope;
 };
 
 // Stress ordering: xx, yy, zz, xy, yz, zx. All stresses are Cauchy stresses.
@@ -37,16 +38,30 @@ inline bool valid(const Parameters& p) {
   for(unsigned i=0;i<sizeof(values)/sizeof(values[0]);++i)
     if(!std::isfinite(values[i])) return false;
   return p.g>0 && p.a>=0 && p.b>=0 && p.c>=0 && p.n>0 && p.fc>0 &&
-    p.tension>0 && p.rate0>0 && p.efmin>=0 && p.sfmax>0 &&
+    p.tension>0 && p.rate0>0 && p.efmin>0 && p.sfmax>0 &&
     p.pc>0 && p.muc>0 && p.pl>p.pc && p.mul>0 && p.d1>0 && p.d2>=0 &&
-    p.k1>0 && p.mul+p.pl/p.k1>p.muc;
+    p.k1>0 && p.k2>=0 && p.k3>=0;
 }
 
-HJC_HD inline State initialize(const Parameters& p) {
-  State s = {};
-  const double ef = p.d1*pow(p.tension/p.fc,p.d2);
-  // Initial damage convention; this is not an imposed physical prestrain.
-  if(ef>p.efmin) s.damage=fmin(1.0,1.e-4/ef);
+// Match the crushing line to the dense EOS at PL. UL is permanent compaction.
+// Derived constants are prepared once, outside the material-point loop.
+inline bool prepare(Parameters& p) {
+  if(!valid(p)) return false;
+  double lo=0.0,hi=p.pl/p.k1;
+  for(int i=0;i<64;++i) {
+    const double eta=0.5*(lo+hi);
+    if(eta*(p.k1+eta*(p.k2+eta*p.k3))<p.pl) lo=eta;
+    else hi=eta;
+  }
+  p.locking_compression=p.mul+(1.0+p.mul)*0.5*(lo+hi);
+  if(p.locking_compression<=p.muc) return false;
+  p.crushing_slope=(p.pl-p.pc)/(p.locking_compression-p.muc);
+  return std::isfinite(p.crushing_slope) && std::isfinite(p.pc/p.muc) &&
+    p.crushing_slope<fmin(p.pc/p.muc,p.pl/(p.locking_compression-p.mul));
+}
+
+HJC_HD inline State initialize(const Parameters&) {
+  State s={};
   return s;
 }
 
@@ -72,45 +87,45 @@ HJC_HD inline Result update(const Parameters& p, const double deps[6],
   s.volume_strain+=deps[0]+deps[1]+deps[2];
   const double mu=expm1(-s.volume_strain);
   const double k0=p.pc/p.muc;
-  double pressure, dpdmu, dmup=0.0;
-  // The previous density measure selects the EOS branch and unloading modulus.
-  if(s.density_measure<1.0) {
-    const double k=k0+(p.k1-k0)*s.density_measure;
-    const double h=(p.pl-p.pc)/p.mul;
-    const double trialp=k*(mu-s.plastic_volume);
-    dmup=fmax(0.0,(trialp-p.pc-h*s.plastic_volume)/(k+h));
-    s.plastic_volume+=dmup;
-    pressure=k*(mu-s.plastic_volume);
-    dpdmu=k;
-  } else {
-    const double m=(mu-p.mul)/(1.0+p.mul);
-    pressure=p.k1*m+p.k2*m*m+p.k3*m*m*m;
-    dpdmu=(p.k1+2.0*p.k2*m+3.0*p.k3*m*m)/(1.0+p.mul);
-  }
+  double pressure;
   s.max_compression=fmax(s.max_compression,mu);
   s.density_measure=fmin(1.0,fmax(0.0,
-    (s.max_compression-p.muc)/(p.mul+p.pl/p.k1-p.muc)));
+    (s.max_compression-p.muc)/(p.locking_compression-p.muc)));
+  const double volume=p.mul*s.density_measure;
+  const double dmup=fmax(0.0,volume-s.plastic_volume);
+  s.plastic_volume=volume;
+  if(s.max_compression>=p.locking_compression) {
+    const double m=(mu-p.mul)/(1.0+p.mul);
+    pressure=p.k1*m;
+    if(m>0.0) pressure+=m*m*(p.k2+p.k3*m);
+  } else if(s.max_compression>p.muc) {
+    const double peakPressure=p.pc+p.crushing_slope*(s.max_compression-p.muc);
+    pressure=peakPressure/(s.max_compression-volume)*(mu-volume);
+  } else {
+    pressure=k0*mu;
+  }
   pressure=fmax(pressure,-p.tension*(1.0-s.damage));
 
   double strength=pressure<0.0 ?
-    fmax(0.0,p.a*(1.0-s.damage-pressure/p.tension)) :
+    fmax(0.0,p.a*(1.0-s.damage+pressure/p.tension)) :
     p.a*(1.0-s.damage)+p.b*pow(pressure/p.fc,p.n);
-  // Preserve the sub-reference logarithm; zero strength is bounded for
-  // parameters/rates outside the finite positive-strength reference paths.
   strength=fmax(0.0,fmin(p.sfmax,
-    strength*(1.0+p.c*log(fmax(rate,1.e-8)/p.rate0))));
+    strength*(1.0+p.c*log(fmax(1.0,rate/p.rate0)))));
   const double normalized_trial=trial/p.fc;
   const double scale=normalized_trial<strength ? 1.0 :
     strength/fmax(normalized_trial,1.e-12);
   for(int i=0;i<6;++i) s.stress[i]*=scale;
-  const double dep=strength>0.0 ? (1.0-scale)*trial/(3.0*p.g) : 0.0;
+  const double dep=(1.0-scale)*trial/(3.0*p.g);
   s.plastic_strain+=dep;
-  const double ef=p.d1*pow(fmax(pressure/p.fc+p.tension/p.fc,0.0),p.d2);
-  // EFMIN is an activation threshold, not a denominator floor.
-  if(ef>p.efmin) s.damage=fmin(1.0,s.damage+(dep+dmup)/ef);
+  const double ef=fmax(p.efmin,p.d1*pow(fmax((pressure+p.tension)/p.fc,0.0),p.d2));
+  s.damage=fmin(1.0,s.damage+(dep+dmup)/ef);
+  pressure=fmax(pressure,-p.tension*(1.0-s.damage));
   for(int i=0;i<3;++i) s.stress[i]-=pressure;
+  // Bound wave stiffness using the largest compression reached so far.
+  const double eta=fmax(0.0,(s.max_compression-p.mul)/(1.0+p.mul));
+  const double dense=(p.k1+2.0*p.k2*eta+3.0*p.k3*eta*eta)/(1.0+p.mul);
   Result r={pressure,trial*scale,ef,
-    fmax(0.0,1.0+mu)*fmax(0.0,dpdmu)+4.0*p.g/3.0};
+    (1.0+fmax(0.0,s.max_compression))*fmax(k0,dense)+4.0*p.g/3.0};
   return r;
 }
 
